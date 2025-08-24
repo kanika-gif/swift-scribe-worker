@@ -56,7 +56,7 @@ b.onclick = async () => {
     <li><b>Select File</b> (pick a Voice Memo or audio file)</li>
     <li><b>Get Contents of URL</b> → Method: <b>POST</b> → URL: <code>/transcribe-summarize</code></li>
     <li><b>Request Body</b>: <b>Form</b> → field name <code>file</code> = (Selected File)</li>
-    <li><b>Get Dictionary from Input</b> → <b>Show Result</b> of key <code>note</code> (or display full JSON)</li>
+    <li><b>Get Dictionary from Input</b> → <b>Show Result</b> of key <code>note</code></li>
   </ul>
 </li>
 </ol>`, { headers: { "content-type": "text/html; charset=utf-8" }});
@@ -95,14 +95,12 @@ b.onclick = async () => {
           parsed = tryJson(repairedOut) || { note: firstOut };
         }
 
-        // sanitize output
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, text);
-
-        // rebuild note if it's invalid or contains JSON/code
         if (!parsed.note || parsed.note.includes("{") || parsed.note.includes("```")) {
           parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
         }
+        parsed.note = stripFakeDatesFromNote(parsed.note);
 
         return json({ model_used: usedModel, ...parsed });
       } catch (e) {
@@ -117,14 +115,12 @@ b.onclick = async () => {
         const file = form.get("file");
         if (!file) return json({ error: "No audio file uploaded (field name must be 'file')." }, 400);
 
-        // 1) Transcribe with Whisper Tiny (free)
         const whisperId = '@cf/openai/whisper-tiny-en';
         const bytes = new Uint8Array(await file.arrayBuffer());
         const whisperResp = await env.AI.run(whisperId, { audio: [...bytes] });
         const transcript = whisperResp?.text || whisperResp?.transcript || "";
         if (!transcript) return json({ error: "Transcription failed or returned empty text." }, 502);
 
-        // 2) Summarize with fallback models
         const system = strictSystemPrompt();
         const chatModels = modelFallbackList();
 
@@ -152,14 +148,12 @@ b.onclick = async () => {
           parsed = tryJson(repairedOut) || { note: firstOut };
         }
 
-        // sanitize output
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, transcript);
-
-        // rebuild note if invalid
         if (!parsed.note || parsed.note.includes("{") || parsed.note.includes("```")) {
           parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
         }
+        parsed.note = stripFakeDatesFromNote(parsed.note);
 
         return json({ model_used: usedModel, transcript, ...parsed });
       } catch (e) {
@@ -244,7 +238,6 @@ async function runWithFallback(env, models, messages, opts = {}) {
   throw lastErr || new Error("All models failed (last tried: " + (lastModel || "none") + ")");
 }
 
-// ---- Post-process sanitizers ----
 function sanitizeActions(actions, sourceText) {
   const hasDate = /\b(20\d{2}|19\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)\b/i.test(sourceText);
   return (Array.isArray(actions) ? actions : [])
@@ -264,13 +257,13 @@ function clampBullets(bullets) {
   });
 }
 
-function ensureNoteLength(note) {
-  return String(note || "");
-}
-
-// ---- Force Markdown Note if model misbehaves ----
 function buildMarkdownNote(summary, bullets, actions) {
   const bulletLines = (bullets || []).map(b => `- ${b}`).join("\n");
   const actionLines = (actions || []).map(a => `- ${a.task} (due: ${a.due || "none"})`).join("\n");
   return `### Summary\n${summary}\n\n### Key Points\n${bulletLines}\n\n### Action Items\n${actionLines}`;
+}
+
+function stripFakeDatesFromNote(note) {
+  if (!note) return "";
+  return note.replace(/\b(?:by\s*)?(?:20\d{2}|19\d{2})([-/.]\d{1,2}([-/.]\d{1,2})?)?\b/gi, "");
 }
