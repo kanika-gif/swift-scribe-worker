@@ -237,14 +237,19 @@ async function runWithFallback(env, models, messages, opts = {}) {
 
 // ---- Post-process sanitizers ----
 function sanitizeActions(actions, sourceText) {
-  const hasDate = /\b(20\\d{2}|19\\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\\d|3[01])|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)\b/i.test(sourceText);
-  return (Array.isArray(actions) ? actions : []).slice(0,4).map(a => {
-    const task = (a && a.task) ? String(a.task).trim() : "";
-    let due = (a && a.due) ? String(a.due).trim() : null;
-    if (!hasDate) due = null;
-    return { task, due: due || null };
-  });
+  // Detects YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD OR month names like "Sep", "September"
+  const hasDate = /\b(20\d{2}|19\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)\b/i.test(sourceText);
+
+  return (Array.isArray(actions) ? actions : [])
+    .slice(0, 4)
+    .map(a => {
+      const task = (a && a.task) ? String(a.task).trim() : "";
+      let due = (a && a.due) ? String(a.due).trim() : null;
+      if (!hasDate) due = null;   // nuke invented dates
+      return { task, due: due || null };
+    });
 }
+
 
 function clampBullets(bullets) {
   return (Array.isArray(bullets) ? bullets : []).slice(0,5).map(b => {
