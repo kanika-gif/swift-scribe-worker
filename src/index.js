@@ -189,9 +189,18 @@ uploadBtn.onclick = upload;
             ],
             { temperature: 0, max_tokens: 360 }
           );
-          parsed = tryJson(repairedOut) || { note: firstOut };
+          parsed = tryJson(repairedOut);
+          if (!isValidJson(parsed)) {
+            parsed = fallbackFromText(text);
+          }
         }
 
+        // Harden missing fields
+        parsed.summary = parsed.summary || "Summary unavailable.";
+        parsed.bullets = Array.isArray(parsed.bullets) ? parsed.bullets : [];
+        parsed.actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+
+        // sanitize output
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, text);
 
@@ -242,9 +251,18 @@ uploadBtn.onclick = upload;
             ],
             { temperature: 0, max_tokens: 360 }
           );
-          parsed = tryJson(repairedOut) || { note: firstOut };
+          parsed = tryJson(repairedOut);
+          if (!isValidJson(parsed)) {
+            parsed = fallbackFromText(transcript);
+          }
         }
 
+        // Harden missing fields
+        parsed.summary = parsed.summary || "Summary unavailable.";
+        parsed.bullets = Array.isArray(parsed.bullets) ? parsed.bullets : [];
+        parsed.actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+
+        // sanitize output
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, transcript);
 
@@ -355,10 +373,38 @@ function clampBullets(bullets) {
   });
 }
 
+// Bullet-proof Markdown builder (never prints "undefined")
 function buildMarkdownNote(summary, bullets, actions) {
-  const bulletLines = (bullets || []).map(b => `- ${b}`).join("\n");
-  const actionLines = (actions || []).map(a => `- ${a.task} (due: ${a.due || "none"})`).join("\n");
-  return `### Summary\n${summary}\n\n### Key Points\n${bulletLines}\n\n### Action Items\n${actionLines}`;
+  const s = (summary && String(summary).trim()) || "Summary unavailable.";
+  const b = Array.isArray(bullets) ? bullets : [];
+  const a = Array.isArray(actions) ? actions : [];
+
+  const bulletLines = b.map(x => `- ${String(x).trim()}`).join("\n");
+  const actionLines = a.map(x => `- ${x && x.task ? String(x.task).trim() : ""} (due: ${(x && x.due) || "none"})`).join("\n");
+
+  return `### Summary
+${s}
+
+### Key Points
+${bulletLines}
+
+### Action Items
+${actionLines}`;
+}
+
+// Guaranteed fallback builder when JSON is invalid
+function fallbackFromText(raw) {
+  const text = String(raw || "").replace(/\s+/g, " ").trim();
+  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const summary = sentences[0]?.slice(0, 140) || "Transcript captured, summary unavailable.";
+  const bullets = sentences.slice(0, 5).map(s => `• ${s.trim()}`);
+  const actions = [{ task: "Review and extract key takeaways", due: null }];
+  return {
+    summary,
+    bullets,
+    actions,
+    note: buildMarkdownNote(summary, bullets, actions)
+  };
 }
 
 function stripFakeDatesFromNote(note) {
