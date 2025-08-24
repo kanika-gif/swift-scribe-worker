@@ -98,7 +98,11 @@ b.onclick = async () => {
         // sanitize output
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, text);
-        parsed.note = ensureNoteLength(parsed.note);
+
+        // rebuild note if it's invalid or contains JSON/code
+        if (!parsed.note || parsed.note.includes("{") || parsed.note.includes("```")) {
+          parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
+        }
 
         return json({ model_used: usedModel, ...parsed });
       } catch (e) {
@@ -151,7 +155,11 @@ b.onclick = async () => {
         // sanitize output
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, transcript);
-        parsed.note = ensureNoteLength(parsed.note);
+
+        // rebuild note if invalid
+        if (!parsed.note || parsed.note.includes("{") || parsed.note.includes("```")) {
+          parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
+        }
 
         return json({ model_used: usedModel, transcript, ...parsed });
       } catch (e) {
@@ -181,18 +189,19 @@ function isValidJson(x) {
 function strictSystemPrompt() {
   return `You are a STRICT summarizer that outputs ONLY compact JSON.
 
-Return EXACTLY this JSON schema (no extra keys, no prose):
+Return EXACTLY this JSON schema:
 {
   "summary": "≤18 words",
-  "bullets": ["• one short point", "• another...", "• up to 5 items"],
+  "bullets": ["• short point", "• another", "• up to 5 items"],
   "actions": [{"task":"imperative verb", "due":"YYYY-MM-DD or null"}],
   "note": "Markdown with three sections: Summary, Key Points, Action Items. 60–120 words total."
 }
 
 Rules:
-- Use ONLY details the user provided; do NOT invent facts.
-- **Never invent dates.** If no explicit date is mentioned, set "due" to null.
-- No disclaimers or generic counseling.
+- NEVER include code fences or nested JSON in "note".
+- "note" must be plain Markdown text, not JSON.
+- Use ONLY user text; do not invent facts.
+- **Never invent dates**. If no date, set "due" to null.
 - Keep everything concise.`;
 }
 
@@ -237,27 +246,31 @@ async function runWithFallback(env, models, messages, opts = {}) {
 
 // ---- Post-process sanitizers ----
 function sanitizeActions(actions, sourceText) {
-  // Detects YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD OR month names like "Sep", "September"
   const hasDate = /\b(20\d{2}|19\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)\b/i.test(sourceText);
-
   return (Array.isArray(actions) ? actions : [])
     .slice(0, 4)
     .map(a => {
       const task = (a && a.task) ? String(a.task).trim() : "";
       let due = (a && a.due) ? String(a.due).trim() : null;
-      if (!hasDate) due = null;   // nuke invented dates
+      if (!hasDate) due = null;
       return { task, due: due || null };
     });
 }
 
-
 function clampBullets(bullets) {
   return (Array.isArray(bullets) ? bullets : []).slice(0,5).map(b => {
     const s = String(b).trim();
-    return s.startsWith("•") ? s : \`• \${s}\`;
+    return s.startsWith("•") ? s : `• ${s}`;
   });
 }
 
 function ensureNoteLength(note) {
   return String(note || "");
+}
+
+// ---- Force Markdown Note if model misbehaves ----
+function buildMarkdownNote(summary, bullets, actions) {
+  const bulletLines = (bullets || []).map(b => `- ${b}`).join("\n");
+  const actionLines = (actions || []).map(a => `- ${a.task} (due: ${a.due || "none"})`).join("\n");
+  return `### Summary\n${summary}\n\n### Key Points\n${bulletLines}\n\n### Action Items\n${actionLines}`;
 }
