@@ -1,8 +1,6 @@
-name = "swift-scribe"
+name = "swift-scribe-worker2"
 main = "src/index.js"
 compatibility_date = "2024-08-01"
-workers_dev = true
 
-# This creates the AI binding named "AI"
 [ai]
 binding = "AI"
