@@ -97,9 +97,9 @@ b.onclick = async () => {
 
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, text);
-        if (!parsed.note || parsed.note.includes("{") || parsed.note.includes("```")) {
-          parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
-        }
+
+        // Always rebuild note into clean Markdown
+        parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
         parsed.note = stripFakeDatesFromNote(parsed.note);
 
         return json({ model_used: usedModel, ...parsed });
@@ -150,9 +150,9 @@ b.onclick = async () => {
 
         parsed.bullets = clampBullets(parsed.bullets);
         parsed.actions = sanitizeActions(parsed.actions, transcript);
-        if (!parsed.note || parsed.note.includes("{") || parsed.note.includes("```")) {
-          parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
-        }
+
+        // Always rebuild note into clean Markdown
+        parsed.note = buildMarkdownNote(parsed.summary, parsed.bullets, parsed.actions);
         parsed.note = stripFakeDatesFromNote(parsed.note);
 
         return json({ model_used: usedModel, transcript, ...parsed });
