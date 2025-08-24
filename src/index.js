@@ -78,7 +78,7 @@ b.onclick = async () => {
             { role: "system", content: system },
             { role: "user", content: "Title: " + (title || "Untitled") + "\nText:\n" + text }
           ],
-          { temperature: 0, max_tokens: 280 }
+          { temperature: 0, max_tokens: 360 }
         );
 
         let parsed = tryJson(firstOut);
@@ -90,10 +90,15 @@ b.onclick = async () => {
               { role: "system", content: repairSystemPrompt() },
               { role: "user", content: firstOut }
             ],
-            { temperature: 0, max_tokens: 280 }
+            { temperature: 0, max_tokens: 360 }
           );
           parsed = tryJson(repairedOut) || { note: firstOut };
         }
+
+        // sanitize output
+        parsed.bullets = clampBullets(parsed.bullets);
+        parsed.actions = sanitizeActions(parsed.actions, text);
+        parsed.note = ensureNoteLength(parsed.note);
 
         return json({ model_used: usedModel, ...parsed });
       } catch (e) {
@@ -109,7 +114,7 @@ b.onclick = async () => {
         if (!file) return json({ error: "No audio file uploaded (field name must be 'file')." }, 400);
 
         // 1) Transcribe with Whisper Tiny (free)
-        const whisperId = '@cf/openai/whisper-tiny-en'; // verify ID in your dashboard
+        const whisperId = '@cf/openai/whisper-tiny-en';
         const bytes = new Uint8Array(await file.arrayBuffer());
         const whisperResp = await env.AI.run(whisperId, { audio: [...bytes] });
         const transcript = whisperResp?.text || whisperResp?.transcript || "";
@@ -126,7 +131,7 @@ b.onclick = async () => {
             { role: "system", content: system },
             { role: "user", content: transcript }
           ],
-          { temperature: 0, max_tokens: 280 }
+          { temperature: 0, max_tokens: 360 }
         );
 
         let parsed = tryJson(firstOut);
@@ -138,10 +143,15 @@ b.onclick = async () => {
               { role: "system", content: repairSystemPrompt() },
               { role: "user", content: firstOut }
             ],
-            { temperature: 0, max_tokens: 280 }
+            { temperature: 0, max_tokens: 360 }
           );
           parsed = tryJson(repairedOut) || { note: firstOut };
         }
+
+        // sanitize output
+        parsed.bullets = clampBullets(parsed.bullets);
+        parsed.actions = sanitizeActions(parsed.actions, transcript);
+        parsed.note = ensureNoteLength(parsed.note);
 
         return json({ model_used: usedModel, transcript, ...parsed });
       } catch (e) {
@@ -176,14 +186,14 @@ Return EXACTLY this JSON schema (no extra keys, no prose):
   "summary": "≤18 words",
   "bullets": ["• one short point", "• another...", "• up to 5 items"],
   "actions": [{"task":"imperative verb", "due":"YYYY-MM-DD or null"}],
-  "note": "Markdown with three sections: Summary, Key Points, Action Items. ≤120 words total."
+  "note": "Markdown with three sections: Summary, Key Points, Action Items. 60–120 words total."
 }
 
 Rules:
-- Use ONLY user text; do not invent facts or advice.
+- Use ONLY details the user provided; do NOT invent facts.
+- **Never invent dates.** If no explicit date is mentioned, set "due" to null.
 - No disclaimers or generic counseling.
-- Keep everything concise. If no dates, set due to null.
-- If you cannot comply, still return valid JSON with empty values.`;
+- Keep everything concise.`;
 }
 
 function repairSystemPrompt() {
@@ -197,7 +207,6 @@ function repairSystemPrompt() {
 Return ONLY JSON.`;
 }
 
-// Preferred order: Starling (HF) → Mistral (CF LoRA) → Mistral (HF) → Llama 3.1 8B (CF)
 function modelFallbackList() {
   return [
     '@hf/nexusflow/starling-lm-7b-beta',
@@ -214,7 +223,7 @@ async function runWithFallback(env, models, messages, opts = {}) {
       const resp = await env.AI.run(id, {
         messages,
         temperature: 0,
-        max_tokens: 280,
+        max_tokens: 360,
         ...opts
       });
       return { model: id, response: resp.response };
@@ -224,4 +233,26 @@ async function runWithFallback(env, models, messages, opts = {}) {
     }
   }
   throw lastErr || new Error("All models failed (last tried: " + (lastModel || "none") + ")");
+}
+
+// ---- Post-process sanitizers ----
+function sanitizeActions(actions, sourceText) {
+  const hasDate = /\b(20\\d{2}|19\\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\\d|3[01])|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)\b/i.test(sourceText);
+  return (Array.isArray(actions) ? actions : []).slice(0,4).map(a => {
+    const task = (a && a.task) ? String(a.task).trim() : "";
+    let due = (a && a.due) ? String(a.due).trim() : null;
+    if (!hasDate) due = null;
+    return { task, due: due || null };
+  });
+}
+
+function clampBullets(bullets) {
+  return (Array.isArray(bullets) ? bullets : []).slice(0,5).map(b => {
+    const s = String(b).trim();
+    return s.startsWith("•") ? s : \`• \${s}\`;
+  });
+}
+
+function ensureNoteLength(note) {
+  return String(note || "");
 }
