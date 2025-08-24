@@ -2,105 +2,90 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // -------- Home test page (text → summarize) --------
+    // ---------- Root: simple UI ----------
     if (request.method === "GET" && url.pathname === "/") {
       return new Response(`<!doctype html>
-<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Swift-Scribe</title></head>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Swift-Scribe</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px;max-width:760px;margin:auto}
+textarea,input,button,pre{width:100%} textarea{min-height:140px}
+button{padding:10px;font-weight:600}
+pre{white-space:pre-wrap;background:#f6f7f9;padding:12px;border-radius:8px}
+a{color:#0b5fff;text-decoration:none}
+</style>
+</head>
 <body>
 <h3>Swift-Scribe</h3>
-<p><a href="/how">How to POST audio</a></p>
-<textarea id="t" rows="8" style="width:100%;"></textarea><br>
-<input id="title" placeholder="Title (optional)" style="width:100%;margin:6px 0;"><br>
+<p><a href="/how">How to POST audio from iPhone</a></p>
+<textarea id="t" placeholder="Paste or type text to summarize…"></textarea><br>
+<input id="title" placeholder="Title (optional)" style="margin:6px 0;"><br>
 <button id="b">Summarize</button>
 <pre id="o"></pre>
 <script>
-document.getElementById("b").onclick = async () => {
+const b=document.getElementById("b"), o=document.getElementById("o");
+b.onclick = async () => {
   const text = document.getElementById("t").value;
   const title = document.getElementById("title").value;
-  document.getElementById("o").textContent = "…";
+  o.textContent = "…";
   const r = await fetch('/summarize', {
-    method:'POST',
-    headers:{'content-type':'application/json'},
+    method:'POST', headers:{'content-type':'application/json'},
     body: JSON.stringify({ text, title })
   });
   const j = await r.json();
-  document.getElementById("o").textContent = (j.note || j.error || 'No output');
+  o.textContent = j.note || j.error || 'No output';
 };
 </script>
-</body></html>`, { headers: { "content-type": "text/html; charset=utf-8" }});
+</body>
+</html>`, { headers: { "content-type": "text/html; charset=utf-8" }});
     }
 
-    // -------- Help page --------
+    // ---------- How-to page ----------
     if (request.method === "GET" && url.pathname === "/how") {
       return new Response(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
-<h3>Upload audio via Shortcut</h3>
+<h3>Upload audio via iPhone Shortcuts</h3>
 <ol>
 <li>Create a Shortcut:
   <ul>
-    <li>Select File (pick a Voice Memo/audio)</li>
-    <li>Get Contents of URL → POST → URL: /transcribe-summarize</li>
-    <li>Request Body: Form → field name <code>file</code> = (Selected File)</li>
-    <li>Get Dictionary from Input → Show Result (key: <code>note</code>)</li>
+    <li><b>Select File</b> (pick a Voice Memo or audio file)</li>
+    <li><b>Get Contents of URL</b> → Method: <b>POST</b> → URL: <code>/transcribe-summarize</code></li>
+    <li><b>Request Body</b>: <b>Form</b> → field name <code>file</code> = (Selected File)</li>
+    <li><b>Get Dictionary from Input</b> → <b>Show Result</b> of key <code>note</code></li>
   </ul>
 </li>
 </ol>`, { headers: { "content-type": "text/html; charset=utf-8" }});
     }
 
-    // -------- Text summarize endpoint (uses Mistral) --------
+    // ---------- Text summarize ----------
     if (request.method === "POST" && url.pathname === "/summarize") {
       try {
         const { text, title = null } = await request.json();
-        if (!text || text.trim().length < 3) {
-          return json({ error: "Please provide some text." }, 400);
-        }
+        if (!text || text.trim().length < 3) return json({ error: "Please provide some text." }, 400);
 
-        const system = `You are a STRICT note formatter.
-Output ONLY valid JSON exactly matching:
-{
-  "summary": "one line",
-  "bullets": ["• item"],
-  "actions": [{"task":"", "due": "YYYY-MM-DD or null"}],
-  "note": "final markdown note"
-}
-Rules:
-- Use only the user's details; do not invent.
-- Preserve specifics (names/relationships).
-- Avoid generic disclaimers unless the user asks.
-- "note" is concise Markdown with Summary, Key Points, and Action Items.`;
+        const system = strictSystemPrompt();
 
-        // 🔁 Choose model here (free):
-        // const model = '@cf/meta/llama-3.1-8b-instruct'; // original
-        const model = '@cf/mistral/mistral-7b-instruct-v0.2'; // better free choice
+        // Try CF Mistral LoRA → HF Mistral → Llama 3.1 8B (free)
+        const chatModels = [
+          '@cf/mistral/mistral-7b-instruct-v0.2-lora',
+          '@hf/mistral/mistral-7b-instruct-v0.2',
+          '@cf/meta/llama-3.1-8b-instruct'
+        ];
 
-        const first = await env.AI.run(model, {
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: "Title: " + (title || "Untitled") + "\\nText:\\n" + text }
-          ],
-          temperature: 0.1,
-          max_tokens: 800
-        });
+        const { response: firstOut, model: usedModel } = await runWithFallback(env, chatModels, [
+          { role: "system", content: system },
+          { role: "user", content: "Title: " + (title || "Untitled") + "\nText:\n" + text }
+        ]);
 
-        let parsed = tryJson(first.response);
+        let parsed = tryJson(firstOut);
 
-        if (!parsed || typeof parsed !== "object" || !("note" in parsed)) {
-          const repairSystem = `You convert text into valid JSON with schema:
-{
-  "summary":"one line",
-  "bullets":["• item"],
-  "actions":[{"task":"", "due":"YYYY-MM-DD or null"}],
-  "note":"final markdown note"
-}
-Return ONLY JSON.`;
-          const repaired = await env.AI.run(model, {
-            messages: [
-              { role: "system", content: repairSystem },
-              { role: "user", content: first.response }
-            ],
-            temperature: 0,
-            max_tokens: 600
-          });
-          parsed = tryJson(repaired.response) || { note: first.response };
+        if (!isValidJson(parsed)) {
+          const { response: repairedOut } = await runWithFallback(env, [usedModel], [
+            { role: "system", content: repairSystemPrompt() },
+            { role: "user", content: firstOut }
+          ], { temperature: 0, max_tokens: 600 });
+          parsed = tryJson(repairedOut) || { note: firstOut };
         }
 
         return json(parsed);
@@ -109,57 +94,40 @@ Return ONLY JSON.`;
       }
     }
 
-    // -------- Audio upload: transcribe (Whisper) + summarize (Mistral) --------
+    // ---------- Transcribe (Whisper) + summarize ----------
     if (request.method === "POST" && url.pathname === "/transcribe-summarize") {
       try {
         const form = await request.formData();
         const file = form.get("file");
-        if (!file) return json({ error: "No audio file uploaded (field name must be 'file')" }, 400);
+        if (!file) return json({ error: "No audio file uploaded (field name must be 'file')." }, 400);
 
         // 1) Transcribe with Whisper Tiny (free)
-        const whisper = "@cf/openai/whisper-tiny-en";
-        const audioBytes = new Uint8Array(await file.arrayBuffer());
-
-        const whisperResp = await env.AI.run(whisper, { audio: [...audioBytes] });
-        const transcript = (whisperResp && (whisperResp.text || whisperResp.transcript || "")) || "";
+        const whisperId = '@cf/openai/whisper-tiny-en'; // confirm in your dashboard
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const whisperResp = await env.AI.run(whisperId, { audio: [...bytes] });
+        const transcript = whisperResp?.text || whisperResp?.transcript || "";
         if (!transcript) return json({ error: "Transcription failed or returned empty text." }, 502);
 
-        // 2) Summarize with Mistral (free)
-        const system = `You are a STRICT note formatter.
-Output ONLY valid JSON exactly matching:
-{
-  "summary": "one line",
-  "bullets": ["• item"],
-  "actions": [{"task":"", "due": "YYYY-MM-DD or null"}],
-  "note": "final markdown note"
-}
-Rules:
-- Use only the transcript; do not invent.
-- Preserve specifics.
-- Avoid generic disclaimers unless the user asks.
-- "note" is concise Markdown with Summary, Key Points, and Action Items.`;
-        const model = '@cf/mistral/mistral-7b-instruct-v0.2';
+        // 2) Summarize with model fallback
+        const system = strictSystemPrompt();
+        const chatModels = [
+          '@cf/mistral/mistral-7b-instruct-v0.2-lora',
+          '@hf/mistral/mistral-7b-instruct-v0.2',
+          '@cf/meta/llama-3.1-8b-instruct'
+        ];
 
-        const first = await env.AI.run(model, {
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: transcript }
-          ],
-          temperature: 0.1,
-          max_tokens: 800
-        });
+        const { response: firstOut, model: usedModel } = await runWithFallback(env, chatModels, [
+          { role: "system", content: system },
+          { role: "user", content: transcript }
+        ]);
 
-        let parsed = tryJson(first.response);
-        if (!parsed || typeof parsed !== "object" || !("note" in parsed)) {
-          const repaired = await env.AI.run(model, {
-            messages: [
-              { role: "system", content: `Return ONLY valid JSON with the required keys (summary, bullets, actions, note).` },
-              { role: "user", content: first.response }
-            ],
-            temperature: 0,
-            max_tokens: 600
-          });
-          parsed = tryJson(repaired.response) || { note: first.response };
+        let parsed = tryJson(firstOut);
+        if (!isValidJson(parsed)) {
+          const { response: repairedOut } = await runWithFallback(env, [usedModel], [
+            { role: "system", content: repairSystemPrompt() },
+            { role: "user", content: firstOut }
+          ], { temperature: 0, max_tokens: 600 });
+          parsed = tryJson(repairedOut) || { note: firstOut };
         }
 
         return json({ transcript, ...parsed });
@@ -172,11 +140,62 @@ Rules:
   }
 };
 
-// ---- helpers ----
+// ---------- helpers ----------
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" }
   });
 }
+
 function tryJson(s) { try { return JSON.parse(s); } catch { return { note: s }; } }
+
+function isValidJson(x) {
+  return x && typeof x === "object" &&
+         "summary" in x && "bullets" in x && "actions" in x && "note" in x;
+}
+
+function strictSystemPrompt() {
+  return `You are a STRICT note formatter.
+Output ONLY valid JSON exactly matching:
+{
+  "summary": "one line",
+  "bullets": ["• item"],
+  "actions": [{"task":"", "due": "YYYY-MM-DD or null"}],
+  "note": "final markdown note"
+}
+Rules:
+- Use ONLY the user's details; do not invent.
+- Preserve specifics (names/relationships).
+- Avoid generic disclaimers unless explicitly requested.
+- "note" is concise Markdown with Summary, Key Points, and Action Items.`;
+}
+
+function repairSystemPrompt() {
+  return `You convert text into valid JSON with schema:
+{
+  "summary":"one line",
+  "bullets":["• item"],
+  "actions":[{"task":"", "due":"YYYY-MM-DD or null"}],
+  "note":"final markdown note"
+}
+Return ONLY JSON.`;
+}
+
+async function runWithFallback(env, models, messages, opts = {}) {
+  let lastErr;
+  for (const id of models) {
+    try {
+      const resp = await env.AI.run(id, {
+        messages,
+        temperature: 0.1,
+        max_tokens: 800,
+        ...opts
+      });
+      return { model: id, response: resp.response };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("All models failed");
+}
