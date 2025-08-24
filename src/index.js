@@ -2,7 +2,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // ---------- Root: simple UI ----------
+    // ---------- Root: simple UI (shows full JSON) ----------
     if (request.method === "GET" && url.pathname === "/") {
       return new Response(`<!doctype html>
 <html>
@@ -18,24 +18,28 @@ a{color:#0b5fff;text-decoration:none}
 </style>
 </head>
 <body>
-<h3>Swift-Scribe</h3>
+<h2>Swift-Scribe</h2>
 <p><a href="/how">How to POST audio from iPhone</a></p>
 <textarea id="t" placeholder="Paste or type text to summarize…"></textarea><br>
 <input id="title" placeholder="Title (optional)" style="margin:6px 0;"><br>
 <button id="b">Summarize</button>
-<pre id="o"></pre>
+<pre id="o">No output</pre>
 <script>
 const b=document.getElementById("b"), o=document.getElementById("o");
 b.onclick = async () => {
   const text = document.getElementById("t").value;
   const title = document.getElementById("title").value;
   o.textContent = "…";
-  const r = await fetch('/summarize', {
-    method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ text, title })
-  });
-  const j = await r.json();
-  o.textContent = j.note || j.error || 'No output';
+  try{
+    const r = await fetch('/summarize', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ text, title })
+    });
+    const j = await r.json();
+    o.textContent = JSON.stringify(j, null, 2);
+  }catch(e){
+    o.textContent = "Request failed: " + (e.message||e);
+  }
 };
 </script>
 </body>
@@ -52,7 +56,7 @@ b.onclick = async () => {
     <li><b>Select File</b> (pick a Voice Memo or audio file)</li>
     <li><b>Get Contents of URL</b> → Method: <b>POST</b> → URL: <code>/transcribe-summarize</code></li>
     <li><b>Request Body</b>: <b>Form</b> → field name <code>file</code> = (Selected File)</li>
-    <li><b>Get Dictionary from Input</b> → <b>Show Result</b> of key <code>note</code></li>
+    <li><b>Get Dictionary from Input</b> → <b>Show Result</b> of key <code>note</code> (or display full JSON)</li>
   </ul>
 </li>
 </ol>`, { headers: { "content-type": "text/html; charset=utf-8" }});
@@ -65,30 +69,33 @@ b.onclick = async () => {
         if (!text || text.trim().length < 3) return json({ error: "Please provide some text." }, 400);
 
         const system = strictSystemPrompt();
+        const chatModels = modelFallbackList();
 
-        // Try CF Mistral LoRA → HF Mistral → Llama 3.1 8B (free)
-        const chatModels = [
-          '@cf/mistral/mistral-7b-instruct-v0.2-lora',
-          '@hf/mistral/mistral-7b-instruct-v0.2',
-          '@cf/meta/llama-3.1-8b-instruct'
-        ];
-
-        const { response: firstOut, model: usedModel } = await runWithFallback(env, chatModels, [
-          { role: "system", content: system },
-          { role: "user", content: "Title: " + (title || "Untitled") + "\nText:\n" + text }
-        ]);
+        const { response: firstOut, model: usedModel } = await runWithFallback(
+          env,
+          chatModels,
+          [
+            { role: "system", content: system },
+            { role: "user", content: "Title: " + (title || "Untitled") + "\nText:\n" + text }
+          ],
+          { temperature: 0, max_tokens: 280 }
+        );
 
         let parsed = tryJson(firstOut);
-
         if (!isValidJson(parsed)) {
-          const { response: repairedOut } = await runWithFallback(env, [usedModel], [
-            { role: "system", content: repairSystemPrompt() },
-            { role: "user", content: firstOut }
-          ], { temperature: 0, max_tokens: 600 });
+          const { response: repairedOut } = await runWithFallback(
+            env,
+            [usedModel],
+            [
+              { role: "system", content: repairSystemPrompt() },
+              { role: "user", content: firstOut }
+            ],
+            { temperature: 0, max_tokens: 280 }
+          );
           parsed = tryJson(repairedOut) || { note: firstOut };
         }
 
-        return json(parsed);
+        return json({ model_used: usedModel, ...parsed });
       } catch (e) {
         return json({ error: e.message || "Unknown error" }, 500);
       }
@@ -102,35 +109,41 @@ b.onclick = async () => {
         if (!file) return json({ error: "No audio file uploaded (field name must be 'file')." }, 400);
 
         // 1) Transcribe with Whisper Tiny (free)
-        const whisperId = '@cf/openai/whisper-tiny-en'; // confirm in your dashboard
+        const whisperId = '@cf/openai/whisper-tiny-en'; // verify ID in your dashboard
         const bytes = new Uint8Array(await file.arrayBuffer());
         const whisperResp = await env.AI.run(whisperId, { audio: [...bytes] });
         const transcript = whisperResp?.text || whisperResp?.transcript || "";
         if (!transcript) return json({ error: "Transcription failed or returned empty text." }, 502);
 
-        // 2) Summarize with model fallback
+        // 2) Summarize with fallback models
         const system = strictSystemPrompt();
-        const chatModels = [
-          '@cf/mistral/mistral-7b-instruct-v0.2-lora',
-          '@hf/mistral/mistral-7b-instruct-v0.2',
-          '@cf/meta/llama-3.1-8b-instruct'
-        ];
+        const chatModels = modelFallbackList();
 
-        const { response: firstOut, model: usedModel } = await runWithFallback(env, chatModels, [
-          { role: "system", content: system },
-          { role: "user", content: transcript }
-        ]);
+        const { response: firstOut, model: usedModel } = await runWithFallback(
+          env,
+          chatModels,
+          [
+            { role: "system", content: system },
+            { role: "user", content: transcript }
+          ],
+          { temperature: 0, max_tokens: 280 }
+        );
 
         let parsed = tryJson(firstOut);
         if (!isValidJson(parsed)) {
-          const { response: repairedOut } = await runWithFallback(env, [usedModel], [
-            { role: "system", content: repairSystemPrompt() },
-            { role: "user", content: firstOut }
-          ], { temperature: 0, max_tokens: 600 });
+          const { response: repairedOut } = await runWithFallback(
+            env,
+            [usedModel],
+            [
+              { role: "system", content: repairSystemPrompt() },
+              { role: "user", content: firstOut }
+            ],
+            { temperature: 0, max_tokens: 280 }
+          );
           parsed = tryJson(repairedOut) || { note: firstOut };
         }
 
-        return json({ transcript, ...parsed });
+        return json({ model_used: usedModel, transcript, ...parsed });
       } catch (e) {
         return json({ error: e.message || "Unknown error" }, 500);
       }
@@ -156,19 +169,21 @@ function isValidJson(x) {
 }
 
 function strictSystemPrompt() {
-  return `You are a STRICT note formatter.
-Output ONLY valid JSON exactly matching:
+  return `You are a STRICT summarizer that outputs ONLY compact JSON.
+
+Return EXACTLY this JSON schema (no extra keys, no prose):
 {
-  "summary": "one line",
-  "bullets": ["• item"],
-  "actions": [{"task":"", "due": "YYYY-MM-DD or null"}],
-  "note": "final markdown note"
+  "summary": "≤18 words",
+  "bullets": ["• one short point", "• another...", "• up to 5 items"],
+  "actions": [{"task":"imperative verb", "due":"YYYY-MM-DD or null"}],
+  "note": "Markdown with three sections: Summary, Key Points, Action Items. ≤120 words total."
 }
+
 Rules:
-- Use ONLY the user's details; do not invent.
-- Preserve specifics (names/relationships).
-- Avoid generic disclaimers unless explicitly requested.
-- "note" is concise Markdown with Summary, Key Points, and Action Items.`;
+- Use ONLY user text; do not invent facts or advice.
+- No disclaimers or generic counseling.
+- Keep everything concise. If no dates, set due to null.
+- If you cannot comply, still return valid JSON with empty values.`;
 }
 
 function repairSystemPrompt() {
@@ -182,20 +197,31 @@ function repairSystemPrompt() {
 Return ONLY JSON.`;
 }
 
+// Preferred order: Starling (HF) → Mistral (CF LoRA) → Mistral (HF) → Llama 3.1 8B (CF)
+function modelFallbackList() {
+  return [
+    '@hf/nexusflow/starling-lm-7b-beta',
+    '@cf/mistral/mistral-7b-instruct-v0.2-lora',
+    '@hf/mistral/mistral-7b-instruct-v0.2',
+    '@cf/meta/llama-3.1-8b-instruct'
+  ];
+}
+
 async function runWithFallback(env, models, messages, opts = {}) {
-  let lastErr;
+  let lastErr, lastModel = null;
   for (const id of models) {
     try {
       const resp = await env.AI.run(id, {
         messages,
-        temperature: 0.1,
-        max_tokens: 800,
+        temperature: 0,
+        max_tokens: 280,
         ...opts
       });
       return { model: id, response: resp.response };
     } catch (e) {
       lastErr = e;
+      lastModel = id;
     }
   }
-  throw lastErr || new Error("All models failed");
+  throw lastErr || new Error("All models failed (last tried: " + (lastModel || "none") + ")");
 }
